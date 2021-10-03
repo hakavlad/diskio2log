@@ -151,6 +151,17 @@ def monitor(r_ios_old, r_mib_old, r_wait_old,
         sleep(interval)
 
 
+DISKSTATS = '/proc/diskstats'
+
+
+try:
+    with open(DISKSTATS, 'rb') as f:
+        f.read()
+except Exception as e:
+    print(e)
+    exit(1)
+
+
 parser = ArgumentParser()
 
 parser.add_argument(
@@ -216,8 +227,6 @@ if interval <= 0:
     log('error: argument -i/--interval: the value must be greater than 0')
     exit(1)
 
-
-DISKSTATS = '/proc/diskstats'
 
 DEV_SEPARATOR = ' ' + dev + ' '
 
