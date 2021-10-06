@@ -43,30 +43,39 @@ def mlockall():
 def check_stats():
     """
     """
-    with open(DISKSTATS, 'rb', buffering=0) as f:
-        dev_line = f.read().decode().split('\n')
+    fd[None].seek(0)
+    dev_lines = fd[None].read().decode().split('\n')
 
     dev_ok = False
-    for i in dev_line:
-        if DEV_SEPARATOR in i:
-            _, _, a = i.rpartition(DEV_SEPARATOR)
+    for dev_line in dev_lines:
+        if DEV_SEPARATOR in dev_line:
+            _, _, line_rpart = dev_line.rpartition(DEV_SEPARATOR)
             dev_ok = True
 
     if not dev_ok:
         log('device not found')
         exit(1)
 
-    (r_ios, _, r_sectors, r_ticks, w_ios, _, w_sectors, w_ticks, in_flights
-     ) = a.split()[:9]
+    (r_ios, r_merges, r_sectors, r_ticks,
+     w_ios, w_merges, w_sectors, w_ticks,
+     in_flights, active
+     ) = line_rpart.split()[:10]
 
     r_ios = int(r_ios)
+    r_merges = int(r_merges)
     r_mib = int(r_sectors) * SECT_MULT
     r_wait = int(r_ticks) / T
+
     w_ios = int(w_ios)
+    w_merges = int(w_merges)
     w_mib = int(w_sectors) * SECT_MULT
     w_wait = int(w_ticks) / T
 
-    return r_ios, r_mib, r_wait, w_ios, w_mib, w_wait, in_flights
+    active = int(active) / T
+
+    return (r_ios, r_merges, r_mib, r_wait,
+            w_ios, w_merges, w_mib, w_wait,
+            in_flights, active)
 
 
 def signal_handler(signum, frame):
@@ -80,73 +89,172 @@ def signal_handler(signum, frame):
 
     log('--')
 
-    r_ios, r_mib, r_wait, w_ios, w_mib, w_wait, in_flights = check_stats()
+    (r_ios, r_merges, r_mib, r_wait,
+     w_ios, w_merges, w_mib, w_wait,
+     in_flights, active) = check_stats()
+
+    fd[None].close()
 
     d_r_ios = r_ios - r_ios0
+    d_r_merges = r_merges - r_merges0
     d_r_mib = r_mib - r_mib0
     d_r_wait = r_wait - r_wait0
+
     d_w_ios = w_ios - w_ios0
+    d_w_merges = w_merges - w_merges0
     d_w_mib = w_mib - w_mib0
     d_w_wait = w_wait - w_wait0
 
+    d_active = active - active0
+
     d_t = monotonic() - t0
 
-    log('In the last {}s:'.format(round(d_t, 1)))
-
-    log('R: {}MiB, {} requests, await {}s (avg {}M/s, {}r/s, {}%)'.format(
+    log('I/O statistics for {} in the last {}s:'.format(dev, round(d_t, 1)))
+    log('  Read:')
+    log('    {} MiB (avg {} MiB/s)'.format(
         round(d_r_mib, 1),
+        round(d_r_mib / d_t, 1)
+    ))
+    log('    {} requests processed (avg {} rp/s)'.format(
         d_r_ios,
+        round(d_r_ios / d_t, 1)
+    ))
+    log('    {} requests merged with in-queue I/O (avg {} rm/s)'.format(
+        d_r_merges,
+        round(d_r_merges / d_t, 1)
+    ))
+    log('    await {}s (avg {}%)'.format(
         round(d_r_wait, 1),
-        round(d_r_mib / d_t, 1),
-        round(d_r_ios / d_t, 1),
         round(d_r_wait / d_t * 100, 1)
     ))
-
-    log('W: {}MiB, {} requests, await {}s (avg {}M/s, {}r/s, {}%)'.format(
+    log('  Write:')
+    log('    {} MiB (avg {} MiB/s)'.format(
         round(d_w_mib, 1),
+        round(d_w_mib / d_t, 1)
+    ))
+    log('    {} requests processed (avg {} rp/s)'.format(
         d_w_ios,
+        round(d_w_ios / d_t, 1)
+    ))
+    log('    {} requests merged with in-queue I/O (avg {} rm/s)'.format(
+        d_w_merges,
+        round(d_w_merges / d_t, 1)
+    ))
+    log('    await {}s (avg {}%)'.format(
         round(d_w_wait, 1),
-        round(d_w_mib / d_t, 1),
-        round(d_w_ios / d_t, 1),
         round(d_w_wait / d_t * 100, 1)
+    ))
+    log('  Utilization: {}s (avg {}%)'.format(
+        round(d_active, 1),
+        round(d_active / d_t * 100, 1)
     ))
 
     exit()
 
 
-def monitor(r_ios_old, r_mib_old, r_wait_old,
-            w_ios_old, w_mib_old, w_wait_old, t):
+def monitor(r_ios_old, r_merges_old, r_mib_old, r_wait_old,
+            w_ios_old, w_merges_old, w_mib_old, w_wait_old, active_old, t_old):
     """
     """
     sleep(interval)
 
     while True:
-        r_ios, r_mib, r_wait, w_ios, w_mib, w_wait, in_flights = check_stats()
+
+        (r_ios, r_merges, r_mib, r_wait,
+         w_ios, w_merges, w_mib, w_wait,
+         in_flights, active) = check_stats()
+
+        t_new = monotonic()
 
         d_r_ios = r_ios - r_ios_old
+        d_r_merges = r_merges - r_merges_old
         d_r_mib = r_mib - r_mib_old
         d_r_wait = r_wait - r_wait_old
+
         d_w_ios = w_ios - w_ios_old
+        d_w_merges = w_merges - w_merges_old
         d_w_mib = w_mib - w_mib_old
         d_w_wait = w_wait - w_wait_old
 
-        d_t = monotonic() - t
+        d_active = active - active_old
 
-        (r_ios_old, r_mib_old, r_wait_old, w_ios_old, w_mib_old, w_wait_old
-         ) = r_ios, r_mib, r_wait, w_ios, w_mib, w_wait
+        d_t = t_new - t_old
 
-        t = monotonic()
+        (r_ios_old, r_merges_old, r_mib_old, r_wait_old,
+         w_ios_old, w_merges_old, w_mib_old, w_wait_old, active_old
+         ) = (r_ios, r_merges, r_mib, r_wait,
+              w_ios, w_merges, w_mib, w_wait, active)
 
-        log('R {}M/s, {}r/s, await {}% | '
-            'W {}M/s, {}r/s, await {}% | in_fl {}r'.format(
-                round(d_r_mib / d_t, 1),
-                round(d_r_ios / d_t),
-                round(d_r_wait / d_t * 100),
-                round(d_w_mib / d_t, 1),
-                round(d_w_ios / d_t),
-                round(d_w_wait / d_t * 100),
-                in_flights
-            ))
+        t_old = t_new
+
+        if mode == '1':
+            log('R {} MiB/s, await {}% | W {} MiB/s, await '
+                '{}% | util {}%'.format(
+                    round(d_r_mib / d_t, 1),
+                    round(d_r_wait / d_t * 100),
+                    round(d_w_mib / d_t, 1),
+                    round(d_w_wait / d_t * 100),
+                    round(d_active / d_t * 100, 1)
+                ))
+
+        elif mode == '2':
+            log('R {} MiB/s, {} rp/s, {} rm/s, await {}% | W {} MiB/s, '
+                '{} rp/s, {} rm/s, await {}% | in_fl {}r | util {}%'.format(
+                    round(d_r_mib / d_t, 1),
+                    round(d_r_ios / d_t),
+                    round(d_r_merges / d_t),
+                    round(d_r_wait / d_t * 100),
+                    round(d_w_mib / d_t, 1),
+                    round(d_w_ios / d_t),
+                    round(d_w_merges / d_t),
+                    round(d_w_wait / d_t * 100),
+                    in_flights,
+                    round(d_active / d_t * 100, 1)
+                ))
+
+        elif mode == '3':
+            log('R {} MiB, {} rp, {} rm, await {}s | W {} MiB, {} rp, '
+                '{} rm, await {}s | in_fl {}r | util {}s'.format(
+                    round(d_r_mib, 1),
+                    d_r_ios,
+                    d_r_merges,
+                    round(d_r_wait, 1),
+                    round(d_w_mib, 1),
+                    d_w_ios,
+                    d_w_merges,
+                    round(d_w_wait, 1),
+                    in_flights,
+                    round(d_active, 1),
+                ))
+
+        elif mode == '4':
+            log('R {} MiB ({} MiB/s), {} rp ({} rp/s), {} rm ({} rm/s), '
+                'await {}s ({}%) | W {} MiB ({} MiB/s), {} rp ({} rp/s), '
+                '{} rm ({} rm/s), await {}s ({}%) | in_fl {}r | util {}s '
+                '({}%)'.format(
+                    round(d_r_mib, 1),
+                    round(d_r_mib / d_t, 1),
+                    d_r_ios,
+                    round(d_r_ios / d_t),
+                    d_r_merges,
+                    round(d_r_merges / d_t),
+                    round(d_r_wait, 1),
+                    round(d_r_wait / d_t * 100),
+                    round(d_w_mib, 1),
+                    round(d_w_mib / d_t, 1),
+                    d_w_ios,
+                    round(d_w_ios / d_t),
+                    d_w_merges,
+                    round(d_w_merges / d_t),
+                    round(d_w_wait, 1),
+                    round(d_w_wait / d_t * 100),
+                    in_flights,
+                    round(d_active, 1),
+                    round(d_active / d_t * 100, 1)
+                ))
+
+        if d_t > WARN_INTERVAL:
+            print('WARNING: real interval was {}s'.format(round(d_t, 2)))
 
         sleep(interval)
 
@@ -154,15 +262,26 @@ def monitor(r_ios_old, r_mib_old, r_wait_old,
 DISKSTATS = '/proc/diskstats'
 
 
+fd = dict()
+
+
 try:
-    with open(DISKSTATS, 'rb') as f:
-        f.read()
+    fd[None] = open(DISKSTATS, 'rb', buffering=0)
+    fd[None].read()
 except Exception as e:
     print(e)
     exit(1)
 
 
 parser = ArgumentParser()
+
+parser.add_argument(
+    '-d',
+    '--dev',
+    help='device name',
+    default='',
+    type=str
+)
 
 parser.add_argument(
     '-i',
@@ -173,6 +292,14 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    '-m',
+    '--mode',
+    help='mode (1, 2, 3 or 4); default: 1',
+    default='1',
+    type=str
+)
+
+parser.add_argument(
     '-l',
     '--log',
     help='path to log file',
@@ -180,19 +307,15 @@ parser.add_argument(
     type=str
 )
 
-parser.add_argument(
-    '-d',
-    '--dev',
-    help='device name',
-    default='',
-    type=str
-)
-
 args = parser.parse_args()
-interval = args.interval
-log_file = args.log
 dev = args.dev
+interval = args.interval
+mode = args.mode
+log_file = args.log
 
+if not (mode == '1' or mode == '2' or mode == '3' or mode == '4'):
+    print('error: invalid mode; valid values are 1, 2, 3 and 4')
+    exit(1)
 
 if log_file is None:
     separate_log = False
@@ -236,6 +359,8 @@ T = 1000
 
 SECT_MULT = 512 / K / K
 
+WARN_INTERVAL = interval * 1.01
+
 
 sig_list = [SIGTERM, SIGINT, SIGQUIT, SIGHUP]
 
@@ -243,18 +368,23 @@ for i in sig_list:
     signal(i, signal_handler)
 
 
-log('Starting diskio2log, block device: {}, interval: {}s'.format(
-    dev, interval))
+log('Starting diskio2log, block device: {}, interval: {}s, mode: {}'.format(
+    dev, interval, mode))
 
 if log_file is not None:
     log('Log file: {}'.format(log_file))
 
+
 mlockall()
+
 
 log('--')
 
-r_ios0, r_mib0, r_wait0, w_ios0, w_mib0, w_wait0, _ = check_stats()
+(r_ios0, r_merges0, r_mib0, r_wait0,
+ w_ios0, w_merges0, w_mib0, w_wait0, _, active0) = check_stats()
 
 t0 = monotonic()
 
-monitor(r_ios0, r_mib0, r_wait0, w_ios0, w_mib0, w_wait0, t0)
+monitor(r_ios0, r_merges0, r_mib0, r_wait0,
+        w_ios0, w_merges0, w_mib0, w_wait0, active0, t0)
+
